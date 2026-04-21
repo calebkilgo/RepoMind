@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html class="dark" lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>RepoMind</title>
+<link rel="icon" type="image/svg+xml" href="docs/assets/logo.svg"/>
+
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500&amp;family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+
+<!-- tailwind.config.js must load AFTER the CDN: the CDN defines window.tailwind, then our
+     config assigns tailwind.config. Reversing this order throws ReferenceError. -->
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<script src="js/tailwind.config.js"></script>
+
+<!-- App styles -->
+<link rel="stylesheet" href="css/styles.css"/>
+
+<!-- graphology + sigma via cdnjs (sigmajs.org recommended CDN); graphology-library via jsdelivr
+     for reliable CORS — cdnjs had inconsistent headers for this package (see issue #510). -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/graphology/0.25.4/graphology.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/sigma.js/2.4.0/sigma.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/graphology-library@0.8.0/dist/graphology-library.min.js"></script>
+</head>
+<body class="bg-surface text-on-surface font-body h-screen w-screen overflow-hidden">
+
+<nav class="fixed top-0 w-full z-50 flex items-center justify-between px-4 bg-[#0c0e12] h-[52px]">
+  <div class="flex items-center gap-3">
+    <!-- Logo -->
+     <img src="docs/assets/logo.svg" alt="RepoMind logo" class="w-10 h-10"/>
+    <span class="font-headline text-lg font-bold tracking-tight text-[#b5cfff]">RepoMind</span>
+    <span class="font-body text-xs text-on-surface-variant font-medium tracking-wide opacity-80">· codebase knowledge graph</span>
+  </div>
+  <div class="flex items-center gap-6 font-['Inter'] text-[0.75rem] font-medium tracking-tight">
+    <div id="stat-mode" class="flex items-center gap-2 text-on-surface-variant">
+      <span class="material-symbols-outlined text-[16px]">folder_off</span>
+      <span id="stat-mode-text">No repository loaded</span>
+    </div>
+    <div class="flex items-center gap-4 text-on-surface-variant font-mono text-xs">
+      <div>Nodes: <span id="num-nodes" class="text-[#b5cfff]">0</span></div>
+      <div>Edges: <span id="num-edges" class="text-[#b5cfff]">0</span></div>
+    </div>
+    <div class="flex items-center gap-2">
+      <a href="https://github.com/YOUR-USERNAME/repomind" target="_blank" rel="noopener" class="p-1.5 rounded-DEFAULT text-on-surface-variant hover:bg-[#1a1c20] hover:text-[#b5cfff] transition-colors" title="Source on GitHub">
+        <span class="material-symbols-outlined text-[18px]">code</span>
+      </a>
+      <button id="btn-about" class="p-1.5 rounded-DEFAULT text-on-surface-variant hover:bg-[#1a1c20] hover:text-[#b5cfff] transition-colors" title="About">
+        <span class="material-symbols-outlined text-[18px]">info</span>
+      </button>
+    </div>
+  </div>
+</nav>
+
+<div class="flex h-full w-full pt-[52px]">
+
+  <aside class="fixed left-0 top-[52px] h-[calc(100vh-52px)] w-[340px] flex flex-col bg-[#0c0e12] z-40 overflow-y-auto">
+    <div class="px-6 flex flex-col gap-8 py-6">
+
+      <section class="flex flex-col gap-4">
+        <div class="flex items-center justify-between">
+          <h2 class="font-headline text-xs font-semibold uppercase tracking-widest text-[#b5cfff]">Repository</h2>
+        </div>
+
+        <div class="flex flex-col gap-3">
+          <div class="flex flex-col gap-1.5">
+            <div class="flex items-center bg-surface-container-low rounded-lg p-2 gap-2 border border-outline-variant/20 focus-within:border-primary-container focus-within:ring-1 focus-within:ring-primary-container transition-all">
+              <span class="material-symbols-outlined text-[16px] text-on-surface-variant">code</span>
+              <span class="font-mono text-[0.7rem] text-on-surface-variant/60 select-none">github.com/</span>
+              <input id="url-a" class="bg-transparent border-none text-xs font-mono text-on-surface placeholder:text-on-surface-variant/40 focus:ring-0 w-full p-0 h-4" placeholder="facebook/react" type="text" autocomplete="off" spellcheck="false"/>
+            </div>
+          </div>
+
+          <button id="btn-toggle-compare" type="button" class="flex items-center gap-1.5 text-[0.7rem] text-primary-container hover:text-primary transition-colors w-fit">
+            <span class="material-symbols-outlined text-[14px]">add</span>
+            <span id="compare-toggle-text">Compare with another repo</span>
+          </button>
+
+          <div id="repo-b-wrap" class="rm-hide flex flex-col gap-1.5">
+            <label class="text-[0.7rem] font-medium text-on-surface-variant">Second repository</label>
+            <div class="flex items-center bg-surface-container-low rounded-lg p-2 gap-2 border border-outline-variant/20 focus-within:border-primary-container focus-within:ring-1 focus-within:ring-primary-container transition-all">
+              <span class="material-symbols-outlined text-[16px] text-on-surface-variant">difference</span>
+              <span class="font-mono text-[0.7rem] text-on-surface-variant/60 select-none">github.com/</span>
+              <input id="url-b" class="bg-transparent border-none text-xs font-mono text-on-surface placeholder:text-on-surface-variant/40 focus:ring-0 w-full p-0 h-4" placeholder="preactjs/preact" type="text" autocomplete="off" spellcheck="false"/>
+            </div>
+          </div>
+
+          <div class="flex flex-col gap-1.5 mt-2">
+            <label class="text-[0.7rem] font-medium text-on-surface-variant">Scan Depth</label>
+            <select id="max-files" class="bg-surface-container-low border border-outline-variant/20 text-xs font-medium text-on-surface rounded-lg p-2 focus:ring-primary-container focus:border-primary-container block w-full h-8">
+              <option value="150">Fast — 150 files</option>
+              <option value="400" selected>Balanced — 400 files</option>
+              <option value="900">Deep — 900 files</option>
+            </select>
+          </div>
+
+          <div class="flex flex-col gap-1.5">
+            <label class="text-[0.7rem] font-medium text-on-surface-variant">GitHub Token <span class="text-on-surface-variant/50">— optional</span></label>
+            <div class="flex items-center bg-surface-container-low rounded-lg p-2 gap-2 border border-outline-variant/20 focus-within:border-primary-container focus-within:ring-1 focus-within:ring-primary-container transition-all">
+              <span class="material-symbols-outlined text-[16px] text-on-surface-variant">key</span>
+              <input id="gh-token" class="bg-transparent border-none text-xs font-mono text-on-surface placeholder:text-on-surface-variant/40 focus:ring-0 w-full p-0 h-4" placeholder="ghp_xxxxxxxxxxxx" type="password" autocomplete="off" spellcheck="false"/>
+              <a href="https://github.com/settings/tokens?type=beta" target="_blank" rel="noopener" title="Create a GitHub token" class="shrink-0 p-1 -m-1 rounded text-on-surface-variant/60 hover:text-primary-container hover:bg-surface-container-high transition-colors">
+                <span class="material-symbols-outlined text-[14px]">open_in_new</span>
+              </a>
+            </div>
+          </div>
+        </div>
+
+        <div class="flex gap-2 mt-2">
+          <button id="btn-build" class="flex-1 flex items-center justify-center gap-2 bg-primary-container text-[#001b3c] font-semibold text-xs py-2 px-4 rounded-lg hover:bg-primary hover:brightness-105 active:scale-95 transition-all disabled:opacity-40 disabled:cursor-not-allowed shadow-lg shadow-primary-container/20">
+            <span class="material-symbols-outlined text-[16px] fill">play_arrow</span>
+            Analyze
+          </button>
+        </div>
+
+        <div id="error-banner" class="rm-hide flex items-start gap-2 bg-error-container/20 border border-error/30 text-error rounded-lg p-3 text-[0.7rem]">
+          <span class="material-symbols-outlined text-[16px] shrink-0">error</span>
+          <span id="error-text"></span>
+        </div>
+      </section>
+
+      <hr class="border-t border-[#333539]/20 w-full"/>
+
+      <section class="flex flex-col gap-4">
+        <div class="flex items-center justify-between">
+          <h2 class="font-headline text-xs font-semibold uppercase tracking-widest text-[#b5cfff]">Search</h2>
+          <span class="text-[0.65rem] text-on-surface-variant font-medium">lexical + 2-hop</span>
+        </div>
+        <div class="flex items-center bg-surface-container-low rounded-lg p-2 gap-2 border border-outline-variant/20 focus-within:border-primary-container focus-within:ring-1 focus-within:ring-primary-container transition-all">
+          <span class="material-symbols-outlined text-[16px] text-on-surface-variant">search</span>
+          <input id="q" class="bg-transparent border-none text-xs text-on-surface placeholder:text-on-surface-variant/40 focus:ring-0 w-full p-0 h-4" placeholder="Where is authentication handled?" type="text" spellcheck="false"/>
+          <div class="flex items-center gap-0.5 text-[0.6rem] font-mono text-on-surface-variant bg-surface-container-highest px-1.5 py-0.5 rounded-DEFAULT">
+            <span>/</span>
+          </div>
+        </div>
+        <div class="flex flex-wrap gap-2" id="chips">
+          <span class="chip px-2 py-1 rounded-DEFAULT bg-surface-container-highest text-[0.65rem] font-medium text-on-surface cursor-pointer hover:bg-surface-container-high transition-colors" data-q="auth">auth</span>
+          <span class="chip px-2 py-1 rounded-DEFAULT bg-surface-container-highest text-[0.65rem] font-medium text-on-surface cursor-pointer hover:bg-surface-container-high transition-colors" data-q="router">router</span>
+          <span class="chip px-2 py-1 rounded-DEFAULT bg-surface-container-highest text-[0.65rem] font-medium text-on-surface cursor-pointer hover:bg-surface-container-high transition-colors" data-q="parser">parser</span>
+          <span class="chip px-2 py-1 rounded-DEFAULT bg-surface-container-highest text-[0.65rem] font-medium text-on-surface cursor-pointer hover:bg-surface-container-high transition-colors" data-q="config">config</span>
+          <span class="chip px-2 py-1 rounded-DEFAULT bg-surface-container-highest text-[0.65rem] font-medium text-on-surface cursor-pointer hover:bg-surface-container-high transition-colors" data-q="render">render</span>
+        </div>
+      </section>
+
+      <hr class="border-t border-[#333539]/20 w-full"/>
+
+      <section class="flex flex-col gap-4">
+        <div class="flex items-center justify-between">
+          <h2 class="font-headline text-xs font-semibold uppercase tracking-widest text-[#b5cfff]">Results</h2>
+          <span id="results-count" class="text-[0.65rem] text-on-surface-variant font-medium"></span>
+        </div>
+        <div id="results" class="flex flex-col gap-1">
+          <div class="flex flex-col items-center justify-center py-8 bg-surface-container-low/50 rounded-lg border border-outline-variant/10 border-dashed">
+            <span class="material-symbols-outlined text-[24px] text-on-surface-variant/40 mb-2">account_tree</span>
+            <p class="text-xs text-on-surface-variant/60 font-medium text-center px-4">Build a graph to see relationships.</p>
+          </div>
+        </div>
+      </section>
+
+      <hr class="border-t border-[#333539]/20 w-full"/>
+
+      <section class="flex flex-col gap-3">
+        <h2 class="font-headline text-xs font-semibold uppercase tracking-widest text-[#b5cfff]">Show</h2>
+        <div class="flex flex-col gap-2">
+          <label class="flex items-center justify-between cursor-pointer group">
+            <div class="flex items-center gap-3">
+              <div class="w-2.5 h-2.5 rounded-sm bg-[#86c888]"></div>
+              <span class="text-xs font-medium text-on-surface group-hover:text-[#b5cfff] transition-colors">Directories</span>
+            </div>
+            <input checked class="f-kind rounded border-outline-variant/40 bg-surface-container-lowest text-primary-container focus:ring-primary-container h-3 w-3" type="checkbox" value="dir"/>
+          </label>
+          <label class="flex items-center justify-between cursor-pointer group">
+            <div class="flex items-center gap-3">
+              <div class="w-2.5 h-2.5 rounded-sm bg-[#89b4fa]"></div>
+              <span class="text-xs font-medium text-on-surface group-hover:text-[#b5cfff] transition-colors">Files</span>
+            </div>
+            <input checked class="f-kind rounded border-outline-variant/40 bg-surface-container-lowest text-primary-container focus:ring-primary-container h-3 w-3" type="checkbox" value="file"/>
+          </label>
+          <label class="flex items-center justify-between cursor-pointer group">
+            <div class="flex items-center gap-3">
+              <div class="w-2.5 h-2.5 rounded-sm bg-[#c58afa]"></div>
+              <span class="text-xs font-medium text-on-surface group-hover:text-[#b5cfff] transition-colors">Classes</span>
+            </div>
+            <input checked class="f-kind rounded border-outline-variant/40 bg-surface-container-lowest text-primary-container focus:ring-primary-container h-3 w-3" type="checkbox" value="class"/>
+          </label>
+          <label class="flex items-center justify-between cursor-pointer group">
+            <div class="flex items-center gap-3">
+              <div class="w-2.5 h-2.5 rounded-sm bg-[#f0b866]"></div>
+              <span class="text-xs font-medium text-on-surface group-hover:text-[#b5cfff] transition-colors">Functions</span>
+            </div>
+            <input checked class="f-kind rounded border-outline-variant/40 bg-surface-container-lowest text-primary-container focus:ring-primary-container h-3 w-3" type="checkbox" value="function"/>
+          </label>
+        </div>
+      </section>
+    </div>
+  </aside>
+
+  <main class="flex-1 bg-surface relative ml-[340px] mr-[380px] h-[calc(100vh-52px)] overflow-hidden">
+    <div class="absolute inset-0 z-0 opacity-10 pointer-events-none" style="background-image: radial-gradient(#89b4fa 1px, transparent 1px); background-size: 24px 24px;"></div>
+
+    <div id="sigma-container"></div>
+
+    <div id="hero" class="absolute inset-0 flex flex-col items-center justify-center pointer-events-none z-10 px-6 text-center">
+      <div class="w-20 h-20 bg-surface-container-lowest rounded-full flex items-center justify-center border border-outline-variant/20 shadow-xl shadow-surface-container-lowest/50 mb-6">
+        <span class="material-symbols-outlined text-[40px] text-primary-container font-light">account_tree</span>
+      </div>
+      <h1 class="font-headline text-[2rem] font-bold tracking-tight text-on-surface leading-tight max-w-md">See the shape of the code.</h1>
+      <p class="font-body text-sm text-on-surface-variant font-medium leading-relaxed px-4 mt-4 max-w-md">
+        Paste a GitHub repository. RepoMind parses it with tree-sitter in your browser, builds a deterministic knowledge graph, and lets you explore it without sending code to any server.
+      </p>
+      <div class="flex items-center gap-3 mt-6 text-xs font-medium text-on-surface-variant/60">
+        <span>Press <kbd class="font-mono bg-surface-container-highest px-1.5 py-0.5 rounded-DEFAULT text-[0.6rem] border border-outline-variant/20">/</kbd> to search</span>
+        <span>·</span>
+        <span><kbd class="font-mono bg-surface-container-highest px-1.5 py-0.5 rounded-DEFAULT text-[0.6rem] border border-outline-variant/20">Esc</kbd> to deselect</span>
+      </div>
+    </div>
+
+    <div id="loader" class="rm-hide absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-20 bg-surface-container-highest/90 backdrop-blur-md border border-outline-variant/20 rounded-xl p-6 shadow-2xl flex flex-col items-center gap-4 w-80">
+      <div class="flex items-center gap-3 w-full justify-center">
+        <span class="material-symbols-outlined text-[18px] text-primary-container animate-spin">progress_activity</span>
+        <span id="loader-phase" class="font-headline text-sm font-semibold tracking-wide text-on-surface">Initializing</span>
+      </div>
+      <div class="w-full h-1 bg-surface-container-lowest rounded-full overflow-hidden relative">
+        <div class="rm-bar-fill"></div>
+      </div>
+      <div id="loader-detail" class="font-mono text-[0.65rem] text-on-surface-variant w-full text-center">Loading tree-sitter runtime</div>
+    </div>
+
+    <div id="canvas-controls" class="rm-hide absolute top-6 right-6 z-20 bg-surface-container-highest/80 backdrop-blur-md border border-outline-variant/20 rounded-lg shadow-lg flex flex-col overflow-hidden">
+      <button id="btn-zoom-in" class="p-2 text-on-surface-variant hover:text-primary-container hover:bg-surface-container-low transition-colors border-b border-outline-variant/20" title="Zoom in"><span class="material-symbols-outlined text-[18px]">add</span></button>
+      <button id="btn-zoom-out" class="p-2 text-on-surface-variant hover:text-primary-container hover:bg-surface-container-low transition-colors border-b border-outline-variant/20" title="Zoom out"><span class="material-symbols-outlined text-[18px]">remove</span></button>
+      <button id="btn-fit" class="p-2 text-on-surface-variant hover:text-primary-container hover:bg-surface-container-low transition-colors border-b border-outline-variant/20" title="Fit to screen"><span class="material-symbols-outlined text-[18px]">fit_screen</span></button>
+      <button id="btn-layout" class="p-2 text-on-surface-variant hover:text-primary-container hover:bg-surface-container-low transition-colors border-b border-outline-variant/20" title="Re-run layout"><span class="material-symbols-outlined text-[18px]">refresh</span></button>
+      <button id="btn-export" class="p-2 text-on-surface-variant hover:text-primary-container hover:bg-surface-container-low transition-colors" title="Export graph JSON"><span class="material-symbols-outlined text-[18px]">download</span></button>
+    </div>
+
+    <div id="canvas-legend" class="rm-hide absolute bottom-6 left-6 z-20 bg-surface-container-lowest border border-outline-variant/20 rounded-lg p-3 flex flex-col gap-2 shadow-lg">
+      <div class="flex items-center gap-3">
+        <div class="w-2 h-2 rounded-sm bg-[#86c888]"></div><span class="text-[0.65rem] font-medium text-on-surface-variant">Dir</span>
+        <div class="w-2 h-2 rounded-sm bg-[#89b4fa]"></div><span class="text-[0.65rem] font-medium text-on-surface-variant">File</span>
+        <div class="w-2 h-2 rounded-sm bg-[#c58afa]"></div><span class="text-[0.65rem] font-medium text-on-surface-variant">Class</span>
+        <div class="w-2 h-2 rounded-sm bg-[#f0b866]"></div><span class="text-[0.65rem] font-medium text-on-surface-variant">Func</span>
+        <div id="legend-cross" class="rm-hide flex items-center gap-2">
+          <div class="w-2 h-2 rounded-sm bg-[#eb7272]"></div><span class="text-[0.65rem] font-medium text-on-surface-variant">Cross</span>
+        </div>
+      </div>
+      <div class="text-[0.6rem] font-mono text-on-surface-variant/60 mt-1 border-t border-outline-variant/20 pt-2">Node size ∝ connectivity</div>
+    </div>
+  </main>
+
+  <aside class="fixed right-0 top-[52px] h-[calc(100vh-52px)] w-[380px] flex flex-col bg-[#0c0e12] z-40 overflow-y-auto">
+    <div id="inspector">
+      <div class="flex flex-col items-center justify-center h-full min-h-[300px] p-10 text-center gap-3">
+        <span class="material-symbols-outlined text-[32px] text-on-surface-variant/40">ads_click</span>
+        <div class="font-headline text-sm font-medium text-on-surface">Nothing selected</div>
+        <p class="text-xs text-on-surface-variant/60 leading-relaxed">Click any node in the graph to inspect its connections, source, and metadata.</p>
+      </div>
+    </div>
+  </aside>
+</div>
+
+<div id="tooltip" class="bg-surface-container-highest/95 backdrop-blur-md border border-outline-variant/20 rounded-lg px-2.5 py-1.5 shadow-xl">
+  <div id="tip-name" class="font-mono text-xs text-on-surface"></div>
+  <div id="tip-kind" class="text-[0.6rem] text-on-surface-variant/60 mt-0.5"></div>
+</div>
+
+<div id="about-modal" class="rm-hide fixed inset-0 z-[200] flex items-center justify-center bg-black/60 backdrop-blur-sm">
+  <div class="bg-surface-container-low border border-outline-variant/20 rounded-xl max-w-lg w-full mx-4 p-6 shadow-2xl">
+    <div class="flex items-center justify-between mb-4">
+      <h3 class="font-headline text-base font-semibold text-on-surface">About RepoMind</h3>
+      <button id="btn-about-close" class="p-1 text-on-surface-variant hover:text-on-surface"><span class="material-symbols-outlined text-[18px]">close</span></button>
+    </div>
+    <div class="text-xs text-on-surface-variant leading-relaxed space-y-3">
+      <p>RepoMind turns any GitHub repository into an interactive knowledge graph. Paste a URL, and it fetches the source, parses it with tree-sitter WASM, builds a call graph, and renders it with Sigma.js — all in your browser.</p>
+      <p>No server, no API key required, no code leaves your machine. Works with JavaScript, TypeScript, Python, C, and C++.</p>
+      <p class="font-mono text-[0.65rem] text-on-surface-variant/60 pt-2 border-t border-outline-variant/10">
+        Built by <a href="https://github.com/YOUR-USERNAME" class="text-primary-container hover:underline" target="_blank" rel="noopener">YOUR-NAME</a> ·
+        <a href="https://github.com/YOUR-USERNAME/repomind" class="text-primary-container hover:underline" target="_blank" rel="noopener">Source</a>
+      </p>
+    </div>
+  </div>
+</div>
+
+<!-- type="module" required: app.js uses an ES import for web-tree-sitter's WASM locateFile hook -->
+<script type="module" src="js/app.js"></script>
+
+</body>
+</html>

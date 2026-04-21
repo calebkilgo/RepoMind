@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 84 84" width="84" height="84">
+  <rect width="84" height="84" rx="14" fill="#0c0e12"/>
+  <rect x="1" y="1" width="82" height="82" rx="13" fill="none" stroke="#1a1c20" stroke-width="1"/>
+  <!-- Central node -->
+  <circle cx="42" cy="42" r="6" fill="#89b4fa"/>
+  <!-- Orbiting nodes -->
+  <circle cx="22" cy="28" r="4" fill="#86c888"/>
+  <circle cx="62" cy="26" r="4" fill="#c58afa"/>
+  <circle cx="20" cy="58" r="4" fill="#f0b866"/>
+  <circle cx="62" cy="60" r="4" fill="#89b4fa"/>
+  <circle cx="42" cy="18" r="3" fill="#b5cfff"/>
+  <!-- Edges -->
+  <g stroke="#89b4fa" stroke-width="1.2" stroke-opacity="0.5" fill="none">
+    <line x1="42" y1="42" x2="22" y2="28"/>
+    <line x1="42" y1="42" x2="62" y2="26"/>
+    <line x1="42" y1="42" x2="20" y2="58"/>
+    <line x1="42" y1="42" x2="62" y2="60"/>
+    <line x1="42" y1="42" x2="42" y2="18"/>
+  </g>
+  <!-- Secondary edges for depth -->
+  <g stroke="#424750" stroke-width="1" stroke-opacity="0.4" fill="none">
+    <line x1="22" y1="28" x2="42" y2="18"/>
+    <line x1="62" y1="26" x2="42" y2="18"/>
+    <line x1="22" y1="28" x2="20" y2="58"/>
+    <line x1="62" y1="26" x2="62" y2="60"/>
+  </g>
+</svg>

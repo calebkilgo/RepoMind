@@ -1,0 +1,44 @@
+/* Material Symbols default weight */
+.material-symbols-outlined {
+  font-variation-settings: 'FILL' 0, 'wght' 200, 'GRAD' 0, 'opsz' 24;
+}
+.material-symbols-outlined.fill {
+  font-variation-settings: 'FILL' 1, 'wght' 200, 'GRAD' 0, 'opsz' 24;
+}
+
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #333539; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #424750; }
+
+::selection { background: rgba(137, 180, 250, 0.25); color: #e2e2e8; }
+
+/* Sigma requires a positioned container; height comes from the parent <main> element. */
+#sigma-container {
+  position: absolute;
+  inset: 0;
+}
+
+/* Positioned and shown/hidden via JS */
+#tooltip {
+  position: fixed;
+  pointer-events: none;
+  z-index: 100;
+  display: none;
+}
+
+/* !important needed to override Tailwind utility classes */
+.rm-hide { display: none !important; }
+
+@keyframes rm-scan {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(400%); }
+}
+.rm-bar-fill {
+  position: absolute;
+  inset: 0;
+  width: 30%;
+  background: #89b4fa;
+  border-radius: 9999px;
+  animation: rm-scan 1.6s ease-in-out infinite;
+}
