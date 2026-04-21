@@ -2,13 +2,10 @@
  * Pipeline: GitHub REST API → tree-sitter (WASM) → graphology → ForceAtlas2 → Sigma.js (WebGL)
  *           D3-force handles continuous spring physics for interactive drag (Neo4j-style).
  *
- * graphology, sigma, graphology-library, and web-tree-sitter are loaded as UMD globals via
- * <script> tags in index.html. Loading web-tree-sitter via esm.sh caused every Language.load()
- * to throw "[unenv] fs.readFileSync is not implemented" — esm.sh injects a Node fs polyfill
- * that stubs the method. The UMD build has no such polyfill.
+ * All libraries load as UMD globals via <script> tags in index.html. Loading
+ * anything via esm.sh installs unenv's fs polyfill on globalThis, whose
+ * readFileSync throws. One bad esm.sh import poisons the whole page.
  */
-
-import { forceSimulation, forceLink, forceManyBody, forceCenter, forceCollide } from 'https://esm.sh/d3-force@3';
 
 function showStartupError(msg) {
   const banner = document.getElementById('error-banner');
@@ -19,6 +16,8 @@ function showStartupError(msg) {
   }
   console.error('[RepoMind startup]', msg);
 }
+
+console.log('[RepoMind] app.js loaded (UMD globals build, no esm.sh)');
 
 if (!window.graphology || !window.graphology.Graph) {
   showStartupError('Failed to load graphology library. Check your network connection or CDN availability.');
@@ -36,11 +35,16 @@ if (!window.TreeSitter) {
   showStartupError('Failed to load web-tree-sitter. Check your network connection or CDN availability.');
   throw new Error('TreeSitter not loaded');
 }
+if (!window.d3 || !window.d3.forceSimulation) {
+  showStartupError('Failed to load d3. Check your network connection or CDN availability.');
+  throw new Error('d3 not loaded');
+}
 
 const Graph = window.graphology.Graph;
 const Sigma = window.Sigma;
 const forceAtlas2 = window.graphologyLibrary.layoutForceAtlas2;
 const Parser = window.TreeSitter;
+const { forceSimulation, forceLink, forceManyBody, forceCenter, forceCollide } = window.d3;
 
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => document.querySelectorAll(s);
@@ -300,30 +304,18 @@ function extractSymbols(tree, content, lang) {
         const m = text(node).match(/#\s*include\s*[<"]([^>"]+)[>"]/);
         if (m) imports.push({ target: m[1] });
       }
-      if (t === 'class_specifier' || t === 'struct_specifier' || t === 'union_specifier') {
-        // Name may be under "name" field, or as a type_identifier child (for bare struct X {...})
-        let nm = nameOf(node);
-        if (!nm) {
-          for (let i = 0; i < node.childCount; i++) {
-            const c = node.child(i);
-            if (c.type === 'type_identifier') { nm = text(c); break; }
-          }
-        }
+      if (t === 'class_specifier' || t === 'struct_specifier') {
+        const nm = nameOf(node);
         if (nm) { symbols.push({ kind: 'class', name: nm, line: node.startPosition.row + 1, endLine: node.endPosition.row + 1 }); newScope = nm; }
       }
       if (t === 'function_definition') {
         const decl = node.childForFieldName?.('declarator');
         let nm = null;
         if (decl) {
-          // Look for identifier immediately before "(" — this handles pointer_declarator,
-          // reference_declarator, and other wrapper nodes
-          const m = text(decl).match(/([A-Za-z_]\w*)\s*\(/);
+          const m = text(decl).match(/(?:::)?([A-Za-z_][\w]*)\s*\(/);
           if (m) nm = m[1];
         }
-        if (nm && nm.length < 80) {
-          symbols.push({ kind: 'function', name: nm, line: node.startPosition.row + 1, endLine: node.endPosition.row + 1 });
-          newScope = nm;
-        }
+        if (nm) { symbols.push({ kind: 'function', name: nm, line: node.startPosition.row + 1, endLine: node.endPosition.row + 1 }); newScope = nm; }
       }
       if (t === 'call_expression') {
         const fn = node.childForFieldName?.('function');
@@ -500,25 +492,86 @@ function buildForceSimulation(graph, sigma) {
   const nodes = [];
   const byId = new Map();
   graph.forEachNode((id, attrs) => {
-    const n = { id, x: attrs.x || 0, y: attrs.y || 0 };
+    const n = { id, x: attrs.x || 0, y: attrs.y || 0, kind: attrs.kind };
     byId.set(id, n);
     nodes.push(n);
   });
 
+  // Count outgoing `contains` edges per source node so we can weaken the pull
+  // on hub nodes. A file with 40 symbols would otherwise pile all 40 directly
+  // on top of the file — unreadable hairball.
+  const outDegreeContains = new Map();
+  graph.forEachEdge((_, attrs, src) => {
+    if (attrs.kind === 'contains') {
+      outDegreeContains.set(src, (outDegreeContains.get(src) || 0) + 1);
+    }
+  });
+
   const links = [];
-  graph.forEachEdge((_, __, src, tgt) => {
+  graph.forEachEdge((_, attrs, src, tgt) => {
     const s = byId.get(src), t = byId.get(tgt);
-    if (s && t && s !== t) links.push({ source: s, target: t });
+    if (s && t && s !== t) {
+      links.push({
+        source: s,
+        target: t,
+        kind: attrs.kind,
+        srcContainsDegree: outDegreeContains.get(src) || 1,
+      });
+    }
   });
 
   const nodeCount = nodes.length;
+
+  // Global charge scales with graph size — hairballs need more spread.
+  const chargeStrength =
+    nodeCount < 200 ? -260 :
+    nodeCount < 600 ? -420 :
+    nodeCount < 1500 ? -620 :
+    -820;
+
+  // Collision radius scales too so labels have breathing room.
+  const collideRadius =
+    nodeCount < 200 ? 14 :
+    nodeCount < 600 ? 18 :
+    22;
+
+  // Link distance varies by edge kind. Calls and imports get real room;
+  // contains stays short to keep the parent/child relationship legible.
+  const linkDistance = (link) => {
+    if (link.kind === 'contains') {
+      // Let fan-out hubs breathe. Symbols around a 40-child file node get
+      // pushed out to ~90px; a simple dir-to-file link stays at 30.
+      const d = link.srcContainsDegree;
+      if (d <= 3) return 30;
+      if (d <= 10) return 40 + d * 2;
+      return Math.min(120, 50 + d * 1.5);
+    }
+    if (link.kind === 'calls') return 80;
+    if (link.kind === 'imports') return 100;
+    if (link.kind === 'cross-repo') return 220;
+    return 60;
+  };
+
+  // Strength: degree-aware for contains, fixed for others.
+  // A hub with 40 kids gets per-edge strength ~0.13 instead of 0.8 — the sum
+  // of pulls stays reasonable instead of crushing the hub inward.
+  const linkStrength = (link) => {
+    if (link.kind === 'contains') {
+      return Math.max(0.15, 0.8 / Math.sqrt(link.srcContainsDegree));
+    }
+    if (link.kind === 'cross-repo') return 0.05;
+    return 0.25;
+  };
+
   const sim = forceSimulation(nodes)
-    .force('link', forceLink(links).distance(45).strength(0.4))
-    .force('charge', forceManyBody().strength(nodeCount > 600 ? -60 : -180))
-    .force('center', forceCenter(0, 0).strength(0.04))
-    .force('collide', forceCollide(6).strength(0.5))
-    .alphaDecay(0.015)
-    .velocityDecay(0.4)
+    .force('link', forceLink(links).distance(linkDistance).strength(linkStrength))
+    .force('charge', forceManyBody().strength(chargeStrength).distanceMax(700))
+    // forceCenter squeezes large graphs inward; use only on small graphs so
+    // they don't drift, or skip entirely for big ones.
+    .force('center', nodeCount < 300 ? forceCenter(0, 0).strength(0.02) : null)
+    .force('collide', forceCollide(collideRadius).strength(0.85))
+    .alphaDecay(0.02)
+    .velocityDecay(0.5)
     .on('tick', () => {
       nodes.forEach(n => {
         graph.setNodeAttribute(n.id, 'x', n.x);
@@ -526,6 +579,11 @@ function buildForceSimulation(graph, sigma) {
       });
       sigma.refresh();
     });
+
+  // Don't auto-run the continuous sim — FA2 already gave a good static layout.
+  // It only wakes up during node drag; the user can enable live layout via
+  // the animation button if they want it.
+  sim.alpha(0).stop();
 
   STATE.d3Sim = sim;
   STATE.d3Nodes = byId;
@@ -608,16 +666,22 @@ function layoutAndRender(graph) {
   if (byRepoB.length > 0) { seed(byRepoA, -200); seed(byRepoB, 200); }
   else seed(byRepoA.concat(byRepoN), 0);
 
-  const iterations = Math.min(400, Math.max(120, Math.floor(30000 / Math.max(1, graph.order))));
+  const iterations = Math.min(600, Math.max(200, Math.floor(60000 / Math.max(1, graph.order))));
+  const n = graph.order;
   forceAtlas2.assign(graph, {
     iterations,
     settings: {
-      gravity: 0.5,
-      scalingRatio: 10,
-      barnesHutOptimize: graph.order > 1000,
+      // Gravity pulls toward center — weaken it as graphs grow so large
+      // graphs don't get compressed into a single blob.
+      gravity: n < 300 ? 1.0 : n < 800 ? 0.3 : 0.1,
+      // Much higher scalingRatio on big graphs. Default 10 is fine for
+      // dozens of nodes; NASA/CS-scale (~1000+) needs 50-80 to breathe.
+      scalingRatio: n < 300 ? 15 : n < 800 ? 35 : 70,
+      barnesHutOptimize: n > 1000,
       barnesHutTheta: 0.5,
       adjustSizes: true,
-      slowDown: 4,
+      edgeWeightInfluence: 1,
+      slowDown: 6,
     },
   });
 
@@ -630,9 +694,13 @@ function layoutAndRender(graph) {
     labelFont: 'Inter, system-ui, sans-serif',
     labelSize: 12,
     labelWeight: '500',
-    labelDensity: 0.4,
-    labelGridCellSize: 100,
-    labelRenderedSizeThreshold: 5,
+    // Lower density + higher rendered-size threshold: at zoomed-out view
+    // only a handful of labels on the largest nodes show; as user zooms in
+    // more labels progressively appear. Avoids the "label soup" effect
+    // when 400 function names overlap at default zoom.
+    labelDensity: 0.07,
+    labelGridCellSize: 150,
+    labelRenderedSizeThreshold: 14,
     minCameraRatio: 0.03,
     maxCameraRatio: 10,
     zIndex: true,
@@ -667,6 +735,8 @@ function layoutAndRender(graph) {
   $('#canvas-controls').classList.remove('rm-hide');
   $('#canvas-legend').classList.remove('rm-hide');
   setTopStat({ nodes: graph.order, edges: graph.size });
+  // Frame the whole graph on arrival instead of landing at an arbitrary zoom
+  setTimeout(() => STATE.sigma?.getCamera().animatedReset({ duration: 400 }), 50);
 }
 
 function nodeReducer(node, data) {
@@ -692,8 +762,19 @@ function nodeReducer(node, data) {
 }
 function edgeReducer(edge, data) {
   const out = { ...data };
+  if (!STATE.graph) return out;
+  const [s, t] = STATE.graph.extremities(edge);
+  // Hide edge if either endpoint is hidden — otherwise ghost edges dangle
+  // when the user toggles symbols off.
+  const active = getActiveKinds();
+  const srcKind = STATE.graph.getNodeAttribute(s, 'kind');
+  const tgtKind = STATE.graph.getNodeAttribute(t, 'kind');
+  if ((srcKind && srcKind !== 'repo' && !active.has(srcKind)) ||
+      (tgtKind && tgtKind !== 'repo' && !active.has(tgtKind))) {
+    out.hidden = true;
+    return out;
+  }
   if (STATE.selected) {
-    const [s, t] = STATE.graph.extremities(edge);
     if (s !== STATE.selected && t !== STATE.selected) {
       out.color = 'rgba(130,138,155,0.04)';
     } else {
@@ -1049,7 +1130,34 @@ $$('.chip').forEach(b => b.addEventListener('click', () => {
 }));
 $$('.f-kind').forEach(cb => cb.addEventListener('change', () => {
   if (STATE.sigma) STATE.sigma.refresh();
+  updateSymbolsToggleLabel();
 }));
+
+// Legend-level shortcut to hide symbol nodes (class + function). This is the
+// same as unchecking both filters in the sidebar, but in a prominent spot on
+// the canvas so users reach for it first when the hairball is overwhelming.
+function updateSymbolsToggleLabel() {
+  const classCb = document.querySelector('.f-kind[value="class"]');
+  const funcCb = document.querySelector('.f-kind[value="function"]');
+  const label = $('#btn-toggle-symbols-label');
+  const icon = $('#btn-toggle-symbols-icon');
+  if (!classCb || !funcCb || !label || !icon) return;
+  const shown = classCb.checked && funcCb.checked;
+  label.textContent = shown ? 'Symbols shown' : 'Symbols hidden';
+  icon.textContent = shown ? 'visibility' : 'visibility_off';
+}
+
+$('#btn-toggle-symbols')?.addEventListener('click', () => {
+  const classCb = document.querySelector('.f-kind[value="class"]');
+  const funcCb = document.querySelector('.f-kind[value="function"]');
+  if (!classCb || !funcCb) return;
+  const shown = classCb.checked && funcCb.checked;
+  const next = !shown;
+  classCb.checked = next;
+  funcCb.checked = next;
+  updateSymbolsToggleLabel();
+  if (STATE.sigma) STATE.sigma.refresh();
+});
 
 $('#btn-zoom-in')?.addEventListener('click', () => STATE.sigma?.getCamera().animatedZoom({ duration: 300 }));
 $('#btn-zoom-out')?.addEventListener('click', () => STATE.sigma?.getCamera().animatedUnzoom({ duration: 300 }));
@@ -1065,6 +1173,184 @@ $('#btn-export')?.addEventListener('click', () => {
   a.href = url; a.download = 'repomind-graph.json'; a.click();
   URL.revokeObjectURL(url);
 });
+
+// PNG export: composites Sigma's canvas layers onto a new canvas, adds background
+// matching the app and a RepoMind watermark in the bottom-right. Uses refresh() +
+// requestAnimationFrame to make sure the WebGL drawing buffer has valid contents
+// (Sigma uses preserveDrawingBuffer: false).
+function exportAsPng() {
+  if (!STATE.sigma || !STATE.graph) return;
+
+  STATE.sigma.refresh();
+
+  requestAnimationFrame(() => {
+    const canvases = STATE.sigma.getCanvases();
+    const layerOrder = ['edges', 'nodes', 'labels'];
+    const sourceLayers = layerOrder
+      .map(name => canvases[name])
+      .filter(c => c instanceof HTMLCanvasElement);
+
+    if (sourceLayers.length === 0) {
+      setError('Could not access graph canvas for export.');
+      return;
+    }
+
+    const width = sourceLayers[0].width;
+    const height = sourceLayers[0].height;
+
+    const out = document.createElement('canvas');
+    out.width = width;
+    out.height = height;
+    const ctx = out.getContext('2d');
+
+    // Dark background matching the app's canvas
+    ctx.fillStyle = '#0c0e12';
+    ctx.fillRect(0, 0, width, height);
+
+    // Subtle blue dot grid matching the live view
+    const containerWidth = STATE.sigma.getContainer().clientWidth || width;
+    const dotSpacing = 24 * (width / containerWidth);
+    ctx.fillStyle = 'rgba(137, 180, 250, 0.08)';
+    for (let x = 0; x < width; x += dotSpacing) {
+      for (let y = 0; y < height; y += dotSpacing) {
+        ctx.beginPath();
+        ctx.arc(x, y, 1, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    for (const layer of sourceLayers) {
+      ctx.drawImage(layer, 0, 0);
+    }
+
+    drawWatermark(ctx, width, height);
+
+    out.toBlob((blob) => {
+      if (!blob) { setError('PNG export failed.'); return; }
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      const repoName = STATE.repos[0] ? `${STATE.repos[0].owner}-${STATE.repos[0].name}` : 'graph';
+      a.href = url;
+      a.download = `repomind-${repoName}.png`;
+      a.click();
+      URL.revokeObjectURL(url);
+    }, 'image/png');
+  });
+}
+
+// Rounded dark-glass pill in the bottom-right with a mini RepoMind logo drawn
+// directly on canvas (so no external file dependency), the wordmark, and the
+// repo identifier. Scales with export width.
+function drawWatermark(ctx, width, height) {
+  const scale = Math.max(1, width / 900);
+  const padding = 20 * scale;
+  const logoSize = 22 * scale;
+  const fontSize = 14 * scale;
+  const subFontSize = 9 * scale;
+
+  ctx.save();
+  ctx.font = `600 ${fontSize}px Inter, system-ui, sans-serif`;
+  const wordmarkWidth = ctx.measureText('RepoMind').width;
+  ctx.font = `500 ${subFontSize}px JetBrains Mono, ui-monospace, monospace`;
+  const subText = STATE.repos[0] ? `${STATE.repos[0].owner}/${STATE.repos[0].name}` : '';
+  const subWidth = subText ? ctx.measureText(subText).width : 0;
+  const textBlockWidth = Math.max(wordmarkWidth, subWidth);
+
+  const pillPadX = 14 * scale;
+  const pillPadY = 8 * scale;
+  const logoPad = 10 * scale;
+  const pillWidth = pillPadX * 2 + logoSize + logoPad + textBlockWidth;
+  const pillHeight = Math.max(38 * scale, logoSize + pillPadY * 2);
+
+  const pillX = width - pillWidth - padding;
+  const pillY = height - pillHeight - padding;
+
+  ctx.fillStyle = 'rgba(12, 14, 18, 0.85)';
+  ctx.strokeStyle = 'rgba(66, 71, 80, 0.5)';
+  ctx.lineWidth = 1 * scale;
+  roundRect(ctx, pillX, pillY, pillWidth, pillHeight, 8 * scale);
+  ctx.fill();
+  ctx.stroke();
+
+  const logoX = pillX + pillPadX;
+  const logoY = pillY + (pillHeight - logoSize) / 2;
+  drawRepoMindLogo(ctx, logoX, logoY, logoSize);
+
+  const textX = logoX + logoSize + logoPad;
+  ctx.fillStyle = '#b5cfff';
+  ctx.font = `600 ${fontSize}px Inter, system-ui, sans-serif`;
+  if (subText) {
+    ctx.textBaseline = 'alphabetic';
+    ctx.fillText('RepoMind', textX, pillY + pillHeight / 2 - 2 * scale);
+    ctx.fillStyle = 'rgba(195, 198, 210, 0.6)';
+    ctx.font = `500 ${subFontSize}px JetBrains Mono, ui-monospace, monospace`;
+    ctx.fillText(subText, textX, pillY + pillHeight / 2 + subFontSize + 1 * scale);
+  } else {
+    ctx.textBaseline = 'middle';
+    ctx.fillText('RepoMind', textX, pillY + pillHeight / 2);
+  }
+  ctx.restore();
+}
+
+function roundRect(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+// Miniature of the SVG logo drawn directly to canvas so the export doesn't
+// depend on any file being fetchable at runtime.
+function drawRepoMindLogo(ctx, x, y, size) {
+  const s = size;
+  const cx = x + s / 2;
+  const cy = y + s / 2;
+  const nodeR = s * 0.08;
+  const centerR = s * 0.12;
+
+  ctx.save();
+  ctx.fillStyle = '#0c0e12';
+  roundRect(ctx, x, y, s, s, s * 0.2);
+  ctx.fill();
+  ctx.strokeStyle = '#1a1c20';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+
+  const nodes = [
+    { dx: -0.28, dy: -0.20, color: '#86c888' },
+    { dx:  0.28, dy: -0.22, color: '#c58afa' },
+    { dx: -0.30, dy:  0.22, color: '#f0b866' },
+    { dx:  0.28, dy:  0.24, color: '#89b4fa' },
+  ];
+
+  ctx.strokeStyle = 'rgba(137,180,250,0.5)';
+  ctx.lineWidth = s * 0.022;
+  for (const n of nodes) {
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.lineTo(cx + n.dx * s, cy + n.dy * s);
+    ctx.stroke();
+  }
+
+  ctx.fillStyle = '#89b4fa';
+  ctx.beginPath();
+  ctx.arc(cx, cy, centerR, 0, Math.PI * 2);
+  ctx.fill();
+
+  for (const n of nodes) {
+    ctx.fillStyle = n.color;
+    ctx.beginPath();
+    ctx.arc(cx + n.dx * s, cy + n.dy * s, nodeR, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  ctx.restore();
+}
+
+$('#btn-export-png')?.addEventListener('click', exportAsPng);
 
 $('#btn-about')?.addEventListener('click', () => $('#about-modal').classList.remove('rm-hide'));
 $('#btn-about-close')?.addEventListener('click', () => $('#about-modal').classList.add('rm-hide'));

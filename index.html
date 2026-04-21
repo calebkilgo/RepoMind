@@ -22,10 +22,11 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/sigma.js/2.4.0/sigma.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/graphology-library@0.8.0/dist/graphology-library.min.js"></script>
 
-<!-- web-tree-sitter as a UMD global (window.TreeSitter). Loading it via esm.sh breaks
-     because esm.sh wraps it with unenv's fs polyfill, which stubs fs.readFileSync to
-     throw — killing every Language.load() call. -->
+<!-- web-tree-sitter (window.TreeSitter) and d3 (window.d3) as UMD globals.
+     Loading either via esm.sh pollutes globalThis with unenv's fs polyfill,
+     whose readFileSync stub throws — killing every Language.load() call. -->
 <script src="https://cdn.jsdelivr.net/npm/web-tree-sitter@0.20.8/tree-sitter.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.8.5/d3.min.js"></script>
 </head>
 <body class="bg-surface text-on-surface font-body h-screen w-screen overflow-hidden">
 
@@ -236,7 +237,8 @@
       <button id="btn-fit" class="p-2 text-on-surface-variant hover:text-primary-container hover:bg-surface-container-low transition-colors border-b border-outline-variant/20" title="Fit to screen"><span class="material-symbols-outlined text-[18px]">fit_screen</span></button>
       <button id="btn-layout" class="p-2 text-on-surface-variant hover:text-primary-container hover:bg-surface-container-low transition-colors border-b border-outline-variant/20" title="Re-run layout"><span class="material-symbols-outlined text-[18px]">refresh</span></button>
       <button id="btn-animate" class="p-2 text-on-surface-variant hover:text-primary-container hover:bg-surface-container-low transition-colors border-b border-outline-variant/20" title="Start live layout"><span class="material-symbols-outlined text-[18px]">animation</span></button>
-      <button id="btn-export" class="p-2 text-on-surface-variant hover:text-primary-container hover:bg-surface-container-low transition-colors" title="Export graph JSON"><span class="material-symbols-outlined text-[18px]">download</span></button>
+      <button id="btn-export-png" class="p-2 text-on-surface-variant hover:text-primary-container hover:bg-surface-container-low transition-colors border-b border-outline-variant/20" title="Save as PNG"><span class="material-symbols-outlined text-[18px]">image</span></button>
+      <button id="btn-export" class="p-2 text-on-surface-variant hover:text-primary-container hover:bg-surface-container-low transition-colors" title="Export graph as JSON"><span class="material-symbols-outlined text-[18px]">data_object</span></button>
     </div>
 
     <div id="canvas-legend" class="rm-hide absolute bottom-6 left-6 z-20 bg-surface-container-lowest border border-outline-variant/20 rounded-lg p-3 flex flex-col gap-2 shadow-lg">
@@ -249,7 +251,13 @@
           <div class="w-2 h-2 rounded-sm bg-[#eb7272]"></div><span class="text-[0.65rem] font-medium text-on-surface-variant">Cross</span>
         </div>
       </div>
-      <div class="text-[0.6rem] font-mono text-on-surface-variant/60 mt-1 border-t border-outline-variant/20 pt-2">Node size ∝ connectivity</div>
+      <div class="flex items-center gap-2 mt-1 pt-2 border-t border-outline-variant/20">
+        <button id="btn-toggle-symbols" class="text-[0.65rem] font-medium px-2 py-1 rounded bg-surface-container-high text-on-surface-variant hover:bg-surface-container-highest hover:text-primary-container transition-colors flex items-center gap-1.5" title="Show or hide class and function nodes">
+          <span id="btn-toggle-symbols-icon" class="material-symbols-outlined text-[14px]">visibility</span>
+          <span id="btn-toggle-symbols-label">Symbols shown</span>
+        </button>
+      </div>
+      <div class="text-[0.6rem] font-mono text-on-surface-variant/60 mt-1">Node size ∝ connectivity</div>
     </div>
   </main>
 
