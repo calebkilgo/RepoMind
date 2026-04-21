@@ -1,13 +1,14 @@
 /*
  * Pipeline: GitHub REST API → tree-sitter (WASM) → graphology → ForceAtlas2 → Sigma.js (WebGL)
+ *           D3-force handles continuous spring physics for interactive drag (Neo4j-style).
  *
- * graphology, sigma, and graphology-library are loaded as UMD globals via <script> tags in
- * index.html. Loading them via esm.sh causes "Class constructor E cannot be invoked without 'new'"
- * on some repos due to default-export wrapping. web-tree-sitter loads as an ES module here
- * because it side-loads a WASM binary and needs module semantics to resolve its locateFile hook.
+ * graphology, sigma, graphology-library, and web-tree-sitter are loaded as UMD globals via
+ * <script> tags in index.html. Loading web-tree-sitter via esm.sh caused every Language.load()
+ * to throw "[unenv] fs.readFileSync is not implemented" — esm.sh injects a Node fs polyfill
+ * that stubs the method. The UMD build has no such polyfill.
  */
 
-import Parser from 'https://esm.sh/web-tree-sitter@0.20.8';
+import { forceSimulation, forceLink, forceManyBody, forceCenter, forceCollide } from 'https://esm.sh/d3-force@3';
 
 function showStartupError(msg) {
   const banner = document.getElementById('error-banner');
@@ -31,10 +32,15 @@ if (!window.graphologyLibrary || !window.graphologyLibrary.layoutForceAtlas2) {
   showStartupError('Failed to load ForceAtlas2 layout. Check your network connection or CDN availability.');
   throw new Error('graphologyLibrary.layoutForceAtlas2 not loaded');
 }
+if (!window.TreeSitter) {
+  showStartupError('Failed to load web-tree-sitter. Check your network connection or CDN availability.');
+  throw new Error('TreeSitter not loaded');
+}
 
 const Graph = window.graphology.Graph;
 const Sigma = window.Sigma;
 const forceAtlas2 = window.graphologyLibrary.layoutForceAtlas2;
+const Parser = window.TreeSitter;
 
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => document.querySelectorAll(s);
@@ -45,6 +51,9 @@ const STATE = {
   sigma: null,
   selected: null,
   parsers: {},
+  fa2Active: false,
+  d3Sim: null,
+  d3Nodes: null,
   maxFiles: 400,
   token: '',
   _neighborhood: null,
@@ -60,14 +69,14 @@ const LANG_BY_EXT = {
 };
 
 const WASM_URLS = {
-  javascript: 'https://unpkg.com/tree-sitter-wasms@0.1.12/out/tree-sitter-javascript.wasm',
-  typescript: 'https://unpkg.com/tree-sitter-wasms@0.1.12/out/tree-sitter-typescript.wasm',
-  tsx:        'https://unpkg.com/tree-sitter-wasms@0.1.12/out/tree-sitter-tsx.wasm',
-  python:     'https://unpkg.com/tree-sitter-wasms@0.1.12/out/tree-sitter-python.wasm',
-  c:          'https://unpkg.com/tree-sitter-wasms@0.1.12/out/tree-sitter-c.wasm',
-  cpp:        'https://unpkg.com/tree-sitter-wasms@0.1.12/out/tree-sitter-cpp.wasm',
+  javascript: 'https://cdn.jsdelivr.net/npm/tree-sitter-wasms@0.1.12/out/tree-sitter-javascript.wasm',
+  typescript: 'https://cdn.jsdelivr.net/npm/tree-sitter-wasms@0.1.12/out/tree-sitter-typescript.wasm',
+  tsx:        'https://cdn.jsdelivr.net/npm/tree-sitter-wasms@0.1.12/out/tree-sitter-tsx.wasm',
+  python:     'https://cdn.jsdelivr.net/npm/tree-sitter-wasms@0.1.12/out/tree-sitter-python.wasm',
+  c:          'https://cdn.jsdelivr.net/npm/tree-sitter-wasms@0.1.12/out/tree-sitter-c.wasm',
+  cpp:        'https://cdn.jsdelivr.net/npm/tree-sitter-wasms@0.1.12/out/tree-sitter-cpp.wasm',
 };
-const TREE_SITTER_CORE_WASM = 'https://unpkg.com/web-tree-sitter@0.20.8/tree-sitter.wasm';
+const TREE_SITTER_CORE_WASM = 'https://cdn.jsdelivr.net/npm/web-tree-sitter@0.20.8/tree-sitter.wasm';
 
 const COLOR = {
   dir: '#86c888',
@@ -291,18 +300,30 @@ function extractSymbols(tree, content, lang) {
         const m = text(node).match(/#\s*include\s*[<"]([^>"]+)[>"]/);
         if (m) imports.push({ target: m[1] });
       }
-      if (t === 'class_specifier' || t === 'struct_specifier') {
-        const nm = nameOf(node);
+      if (t === 'class_specifier' || t === 'struct_specifier' || t === 'union_specifier') {
+        // Name may be under "name" field, or as a type_identifier child (for bare struct X {...})
+        let nm = nameOf(node);
+        if (!nm) {
+          for (let i = 0; i < node.childCount; i++) {
+            const c = node.child(i);
+            if (c.type === 'type_identifier') { nm = text(c); break; }
+          }
+        }
         if (nm) { symbols.push({ kind: 'class', name: nm, line: node.startPosition.row + 1, endLine: node.endPosition.row + 1 }); newScope = nm; }
       }
       if (t === 'function_definition') {
         const decl = node.childForFieldName?.('declarator');
         let nm = null;
         if (decl) {
-          const m = text(decl).match(/(?:::)?([A-Za-z_][\w]*)\s*\(/);
+          // Look for identifier immediately before "(" — this handles pointer_declarator,
+          // reference_declarator, and other wrapper nodes
+          const m = text(decl).match(/([A-Za-z_]\w*)\s*\(/);
           if (m) nm = m[1];
         }
-        if (nm) { symbols.push({ kind: 'function', name: nm, line: node.startPosition.row + 1, endLine: node.endPosition.row + 1 }); newScope = nm; }
+        if (nm && nm.length < 80) {
+          symbols.push({ kind: 'function', name: nm, line: node.startPosition.row + 1, endLine: node.endPosition.row + 1 });
+          newScope = nm;
+        }
       }
       if (t === 'call_expression') {
         const fn = node.childForFieldName?.('function');
@@ -473,6 +494,99 @@ function normalizePath(p) {
   return out.join('/');
 }
 
+function buildForceSimulation(graph, sigma) {
+  if (STATE.d3Sim) { STATE.d3Sim.stop(); STATE.d3Sim = null; }
+
+  const nodes = [];
+  const byId = new Map();
+  graph.forEachNode((id, attrs) => {
+    const n = { id, x: attrs.x || 0, y: attrs.y || 0 };
+    byId.set(id, n);
+    nodes.push(n);
+  });
+
+  const links = [];
+  graph.forEachEdge((_, __, src, tgt) => {
+    const s = byId.get(src), t = byId.get(tgt);
+    if (s && t && s !== t) links.push({ source: s, target: t });
+  });
+
+  const nodeCount = nodes.length;
+  const sim = forceSimulation(nodes)
+    .force('link', forceLink(links).distance(45).strength(0.4))
+    .force('charge', forceManyBody().strength(nodeCount > 600 ? -60 : -180))
+    .force('center', forceCenter(0, 0).strength(0.04))
+    .force('collide', forceCollide(6).strength(0.5))
+    .alphaDecay(0.015)
+    .velocityDecay(0.4)
+    .on('tick', () => {
+      nodes.forEach(n => {
+        graph.setNodeAttribute(n.id, 'x', n.x);
+        graph.setNodeAttribute(n.id, 'y', n.y);
+      });
+      sigma.refresh();
+    });
+
+  STATE.d3Sim = sim;
+  STATE.d3Nodes = byId;
+  return sim;
+}
+
+function setupNodeDrag(sigma) {
+  let dragNode = null;
+  let frozenCamera = null;
+  const container = sigma.getContainer();
+
+  sigma.on('downNode', ({ node }) => {
+    dragNode = node;
+    frozenCamera = sigma.getCamera().getState();
+    container.style.cursor = 'grabbing';
+    $('#tooltip').style.display = 'none';
+    const d3n = STATE.d3Nodes?.get(node);
+    if (d3n) { d3n.fx = d3n.x; d3n.fy = d3n.y; }
+    STATE.d3Sim?.alphaTarget(0.3).restart();
+  });
+
+  sigma.on('enterNode', () => { if (!dragNode) container.style.cursor = 'grab'; });
+  sigma.on('leaveNode', () => { if (!dragNode) container.style.cursor = ''; });
+
+  container.addEventListener('mousemove', (e) => {
+    if (!dragNode) return;
+    if (frozenCamera) sigma.getCamera().setState(frozenCamera);
+    const rect = container.getBoundingClientRect();
+    const pos = sigma.viewportToGraph({ x: e.clientX - rect.left, y: e.clientY - rect.top });
+    const d3n = STATE.d3Nodes?.get(dragNode);
+    if (d3n) { d3n.fx = pos.x; d3n.fy = pos.y; }
+  });
+
+  const stopDrag = () => {
+    if (dragNode) {
+      const d3n = STATE.d3Nodes?.get(dragNode);
+      if (d3n) { d3n.fx = null; d3n.fy = null; }
+      STATE.d3Sim?.alphaTarget(0);
+    }
+    dragNode = null;
+    frozenCamera = null;
+    container.style.cursor = '';
+  };
+  container.addEventListener('mouseup', stopDrag);
+  container.addEventListener('mouseleave', stopDrag);
+}
+
+function toggleAnimation() {
+  const btn = $('#btn-animate');
+  if (!STATE.d3Sim) return;
+  if (STATE.fa2Active) {
+    STATE.d3Sim.alphaTarget(0);
+    STATE.fa2Active = false;
+    if (btn) { btn.title = 'Start live layout'; btn.classList.remove('text-primary-container'); }
+  } else {
+    STATE.fa2Active = true;
+    STATE.d3Sim.alphaTarget(0.15).restart();
+    if (btn) { btn.title = 'Stop live layout'; btn.classList.add('text-primary-container'); }
+  }
+}
+
 function layoutAndRender(graph) {
   setLoader('Computing layout', 'ForceAtlas2');
 
@@ -507,6 +621,7 @@ function layoutAndRender(graph) {
     },
   });
 
+  STATE.fa2Active = false;
   if (STATE.sigma) { STATE.sigma.kill(); STATE.sigma = null; }
   STATE.sigma = new Sigma(graph, $('#sigma-container'), {
     renderEdgeLabels: false,
@@ -525,8 +640,11 @@ function layoutAndRender(graph) {
 
   STATE.sigma.on('clickNode', ({ node }) => selectNode(node));
   STATE.sigma.on('clickStage', () => selectNode(null));
+  STATE.sigma.on('doubleClickNode', ({ node }) => focusNode(node));
 
   const tip = $('#tooltip');
+  setupNodeDrag(STATE.sigma);
+  buildForceSimulation(graph, STATE.sigma);
   STATE.sigma.on('enterNode', ({ node }) => {
     const a = graph.getNodeAttributes(node);
     $('#tip-name').textContent = a.fullLabel || a.label;
@@ -937,6 +1055,7 @@ $('#btn-zoom-in')?.addEventListener('click', () => STATE.sigma?.getCamera().anim
 $('#btn-zoom-out')?.addEventListener('click', () => STATE.sigma?.getCamera().animatedUnzoom({ duration: 300 }));
 $('#btn-fit')?.addEventListener('click', () => STATE.sigma?.getCamera().animatedReset({ duration: 400 }));
 $('#btn-layout')?.addEventListener('click', () => { if (STATE.graph) layoutAndRender(STATE.graph); });
+$('#btn-animate')?.addEventListener('click', () => { if (STATE.graph) toggleAnimation(); });
 $('#btn-export')?.addEventListener('click', () => {
   if (!STATE.graph) return;
   const data = STATE.graph.export();
